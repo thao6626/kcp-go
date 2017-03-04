@@ -17,8 +17,8 @@ const (
 	IKCP_CMD_WINS    = 84 // cmd: window size (tell)
 	IKCP_ASK_SEND    = 1  // need to send IKCP_CMD_WASK
 	IKCP_ASK_TELL    = 2  // need to send IKCP_CMD_WINS
-	IKCP_WND_SND     = 32
-	IKCP_WND_RCV     = 32
+	IKCP_WND_SND     = 32	// send window
+	IKCP_WND_RCV     = 32	// receive window
 	IKCP_MTU_DEF     = 1400
 	IKCP_ACK_FAST    = 3
 	IKCP_INTERVAL    = 100
@@ -123,6 +123,22 @@ func (seg *Segment) encode(ptr []byte) []byte {
 }
 
 // KCP defines a single KCP connection
+// conv：标识号	mtu：最大传输单元	mss：最大报文段
+// snd_una: send unacknowledged
+// snd_nxt: send next
+// rcv_nxt: send next
+// ssthresh:
+// rx_rttvar:
+// rx_srtt:
+// rx_rto:
+// rx_minrto:
+// snd_wnd: send_window	 rcv_wnd: receive_window
+// rmt_wnd: remote_window
+// cwnd:
+// probe:
+// ts_flush
+// xmit
+
 type KCP struct {
 	conv, mtu, mss, state                  uint32
 	snd_una, snd_nxt, rcv_nxt              uint32
@@ -138,10 +154,10 @@ type KCP struct {
 	fastresend     int32
 	nocwnd, stream int32
 
-	snd_queue []Segment
-	rcv_queue []Segment
-	snd_buf   []Segment
-	rcv_buf   []Segment
+	snd_queue []Segment		// send queue
+	rcv_queue []Segment		// receive queue
+	snd_buf   []Segment		// send buf
+	rcv_buf   []Segment		// receive queue
 
 	acklist []ackItem
 
@@ -156,13 +172,14 @@ type ackItem struct {
 
 // NewKCP create a new kcp control object, 'conv' must equal in two endpoint
 // from the same connection.
+// Output 是一个回调函数
 func NewKCP(conv uint32, output Output) *KCP {
 	kcp := new(KCP)
 	kcp.conv = conv
-	kcp.snd_wnd = IKCP_WND_SND
-	kcp.rcv_wnd = IKCP_WND_RCV
-	kcp.rmt_wnd = IKCP_WND_RCV
-	kcp.mtu = IKCP_MTU_DEF
+	kcp.snd_wnd = IKCP_WND_SND	// = 32
+	kcp.rcv_wnd = IKCP_WND_RCV	// = 32
+	kcp.rmt_wnd = IKCP_WND_RCV	// rmt_wnd: remote window
+	kcp.mtu = IKCP_MTU_DEF		// = 1400
 	kcp.mss = kcp.mtu - IKCP_OVERHEAD
 	kcp.buffer = make([]byte, (kcp.mtu+IKCP_OVERHEAD)*3)
 	kcp.rx_rto = IKCP_RTO_DEF
@@ -610,7 +627,7 @@ func (kcp *KCP) wnd_unused() int32 {
 
 // flush pending data
 func (kcp *KCP) flush() {
-	buffer := kcp.buffer
+	buffer := kcp.buffer	// []byte
 	change := 0
 	lost := false
 

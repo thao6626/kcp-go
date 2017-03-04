@@ -28,7 +28,7 @@ const (
 	crcSize                  = 4   // 4bytes packet checksum
 	cryptHeaderSize          = nonceSize + crcSize
 	mtuLimit                 = 2048
-	rxQueueLimit             = 8192
+	rxQueueLimit             = 8192	// receive xmit 队列的限制大小
 	rxFECMulti               = 3 // FEC keeps rxFECMulti* (dataShard+parityShard) ordered packets in memory
 	defaultKeepAliveInterval = 10
 )
@@ -65,10 +65,10 @@ type (
 		chWriteEvent      chan struct{}
 		chUDPOutput       chan []byte
 		headerSize        int
-		ackNoDelay        bool
+		ackNoDelay        bool	// TODO
 		isClosed          bool
 		keepAliveInterval int32
-		mu                sync.Mutex
+		mu                sync.Mutex	// TODO
 		updateInterval    int32
 	}
 
@@ -84,14 +84,14 @@ type (
 // newUDPSession create a new udp session for client or server
 func newUDPSession(conv uint32, dataShards, parityShards int, l *Listener, conn net.PacketConn, remote net.Addr, block BlockCrypt) *UDPSession {
 	sess := new(UDPSession)
-	sess.chUDPOutput = make(chan []byte)
-	sess.die = make(chan struct{})
-	sess.chReadEvent = make(chan struct{}, 1)
-	sess.chWriteEvent = make(chan struct{}, 1)
+	sess.chUDPOutput = make(chan []byte)	// 没有设置大小
+	sess.die = make(chan struct{})	// 没有设置大小
+	sess.chReadEvent = make(chan struct{}, 1)	// 大小为1
+	sess.chWriteEvent = make(chan struct{}, 1)	// 大小为1
 	sess.remote = remote
-	sess.conn = conn
-	sess.keepAliveInterval = defaultKeepAliveInterval
-	sess.l = l
+	sess.conn = conn	// net.PacketConn 实际上是UDPconn
+	sess.keepAliveInterval = defaultKeepAliveInterval	// = 10
+	sess.l = l	// listener
 	sess.block = block
 	sess.fec = newFEC(rxFECMulti*(dataShards+parityShards), dataShards, parityShards)
 	// calculate header size
@@ -103,7 +103,7 @@ func newUDPSession(conv uint32, dataShards, parityShards int, l *Listener, conn 
 	}
 
 	sess.kcp = NewKCP(conv, func(buf []byte, size int) {
-		if size >= IKCP_OVERHEAD {
+		if size >= IKCP_OVERHEAD {	// IKCP_OVERHEAD = 24
 			ext := xmitBuf.Get().([]byte)[:sess.headerSize+size]
 			copy(ext[sess.headerSize:], buf)
 			select {
@@ -115,9 +115,9 @@ func newUDPSession(conv uint32, dataShards, parityShards int, l *Listener, conn 
 	sess.kcp.WndSize(defaultWndSize, defaultWndSize)
 	sess.kcp.SetMtu(IKCP_MTU_DEF - sess.headerSize)
 
-	go sess.updateTask()
+	go sess.updateTask()  // 隔s.updateInterval 就执行一次kcp.flush()
 	go sess.outputTask()
-	if sess.l == nil { // it's a client connection
+	if sess.l == nil { // it's a client connection. listen = nil 说明是客户端连接
 		go sess.readLoop()
 		atomic.AddUint64(&DefaultSnmp.ActiveOpens, 1)
 	} else {
@@ -496,6 +496,7 @@ func (s *UDPSession) outputTask() {
 
 // kcp update, input loop
 func (s *UDPSession) updateTask() {
+	// 原子操作读取&s.updateInterval的值
 	tc := time.After(time.Duration(atomic.LoadInt32(&s.updateInterval)) * time.Millisecond)
 
 	for {
@@ -503,6 +504,7 @@ func (s *UDPSession) updateTask() {
 		case <-tc:
 			s.mu.Lock()
 			s.kcp.flush()
+			// 等待发送的packet小于拥塞窗口的大小，则发写的消息
 			if s.kcp.WaitSnd() < int(s.kcp.Cwnd()) {
 				s.notifyWriteEvent()
 			}
@@ -617,7 +619,7 @@ func (s *UDPSession) kcpInput(data []byte) {
 
 func (s *UDPSession) receiver(ch chan []byte) {
 	for {
-		data := xmitBuf.Get().([]byte)[:mtuLimit]
+		data := xmitBuf.Get().([]byte)[:mtuLimit] // mtuLimit = 2048
 		if n, _, err := s.conn.ReadFrom(data); err == nil && n >= s.headerSize+IKCP_OVERHEAD {
 			select {
 			case ch <- data[:n]:
@@ -633,7 +635,7 @@ func (s *UDPSession) receiver(ch chan []byte) {
 
 // read loop for client session
 func (s *UDPSession) readLoop() {
-	chPacket := make(chan []byte, rxQueueLimit)
+	chPacket := make(chan []byte, rxQueueLimit) // = 8192
 	go s.receiver(chPacket)
 
 	for {
@@ -668,18 +670,18 @@ func (s *UDPSession) readLoop() {
 type (
 	// Listener defines a server listening for connections
 	Listener struct {
-		block                    BlockCrypt
+		block                    BlockCrypt	// TODO block 此处何意？
 		dataShards, parityShards int
-		fec                      *FEC // for fec init test
+		fec                      *FEC // for fec init test 向前纠错
 		conn                     net.PacketConn
-		sessions                 map[string]*UDPSession
-		chAccepts                chan *UDPSession
-		chDeadlinks              chan net.Addr
+		sessions                 map[string]*UDPSession	// 字典  用来存储请求以及其session
+		chAccepts                chan *UDPSession	// channel 被初始化大小为1024
+		chDeadlinks              chan net.Addr		// 被初始化大小为1024
 		headerSize               int
 		die                      chan struct{}
-		rxbuf                    sync.Pool
-		rd                       atomic.Value
-		wd                       atomic.Value
+		rxbuf                    sync.Pool   // receive xmit buf  被初始化为2048类型为byte的slice
+		rd                       atomic.Value	// read deadline
+		wd                       atomic.Value	// write deadline
 	}
 
 	packet struct {
@@ -690,14 +692,14 @@ type (
 
 // monitor incoming data for all connections of server
 func (l *Listener) monitor() {
-	chPacket := make(chan packet, rxQueueLimit)
+	chPacket := make(chan packet, rxQueueLimit) // rxQueueLimit = 8192
 	go l.receiver(chPacket)
 	for {
 		select {
 		case p := <-chPacket:
 			raw := p.data
 			data := p.data
-			from := p.from
+			from := p.from	// net.Addr. 包括网络类型的字符串和"ip:port"的字符串
 			dataValid := false
 			if l.block != nil {
 				l.block.Decrypt(data, data)
@@ -715,25 +717,25 @@ func (l *Listener) monitor() {
 
 			if dataValid {
 				addr := from.String()
-				s, ok := l.sessions[addr]
+				s, ok := l.sessions[addr]	// ip:port 标识一个session
 				if !ok { // new session
-					var conv uint32
+					var conv uint32		// conv号，客户端服务端的conv要相同。conv加在请求数据包里面了
 					convValid := false
-					if l.fec != nil {
+					if l.fec != nil {	// 如果有纠错
 						isfec := binary.LittleEndian.Uint16(data[4:])
 						if isfec == typeData {
 							conv = binary.LittleEndian.Uint32(data[fecHeaderSizePlus2:])
 							convValid = true
 						}
 					} else {
-						conv = binary.LittleEndian.Uint32(data)
+						conv = binary.LittleEndian.Uint32(data) // 以小端的方式取数据包的最前面的32位。这在Segment中有定义，第一个32位就是conv段
 						convValid = true
 					}
 
 					if convValid {
 						s := newUDPSession(conv, l.dataShards, l.parityShards, l, l.conn, from, l.block)
 						s.kcpInput(data)
-						l.sessions[addr] = s
+						l.sessions[addr] = s	// 将新的session存起来 放到字典里面
 						l.chAccepts <- s
 					}
 				} else {
@@ -752,13 +754,13 @@ func (l *Listener) monitor() {
 
 func (l *Listener) receiver(ch chan packet) {
 	for {
-		data := l.rxbuf.Get().([]byte)[:mtuLimit]
+		data := l.rxbuf.Get().([]byte)[:mtuLimit]	// mtuLimit = 2048
 		if n, from, err := l.conn.ReadFrom(data); err == nil && n >= l.headerSize+IKCP_OVERHEAD {
 			ch <- packet{from, data[:n]}
 		} else if err != nil {
 			return
 		} else {
-			atomic.AddUint64(&DefaultSnmp.InErrs, 1)
+			atomic.AddUint64(&DefaultSnmp.InErrs, 1) // TODO snmp
 		}
 	}
 }
@@ -862,10 +864,10 @@ func ListenWithOptions(laddr string, block BlockCrypt, dataShards, parityShards 
 // ServeConn serves KCP protocol for a single packet connection.
 func ServeConn(block BlockCrypt, dataShards, parityShards int, conn net.PacketConn) (*Listener, error) {
 	l := new(Listener)
-	l.conn = conn
+	l.conn = conn  // udp conn
 	l.sessions = make(map[string]*UDPSession)
 	l.chAccepts = make(chan *UDPSession, 1024)
-	l.chDeadlinks = make(chan net.Addr, 1024)
+	l.chDeadlinks = make(chan net.Addr, 1024)	// 类型为net.Addr
 	l.die = make(chan struct{})
 	l.dataShards = dataShards
 	l.parityShards = parityShards
